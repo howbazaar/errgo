@@ -1,17 +1,11 @@
-// The errgo package provides a way to create
-// and diagnose errors. It is compatible with
-// the usual Go error idioms but adds a way to wrap errors
-// so that they record source location information
-// while retaining a consistent way for code to
-// inspect errors to find out particular problems.
-//
 package errgo
 
 import (
 	"bytes"
 	"fmt"
-	"log"
+	"reflect"
 	"runtime"
+	"strings"
 )
 
 const debug = false
@@ -35,20 +29,18 @@ func (loc Location) IsSet() bool {
 // Err holds a description of an error along with information about
 // where the error was created.
 //
-// It may be embedded  in custom error types to add
-// extra information that this errors package can
-// understand.
+// It may be embedded  in custom error types to add extra information that
+// this errors package can understand.
 type Err struct {
-	// Message_ holds the text of the error message. It may be empty
-	// if Underlying is set.
+	// Message_ holds an annotation of the error.
 	Message_ string
 
 	// Cause_ holds the cause of the error as returned
 	// by the Cause method.
 	Cause_ error
 
-	// Underlying holds the underlying error, if any.
-	Underlying_ error
+	// Previous holds the Previous error in the error stack, if any.
+	Previous_ error
 
 	// Location holds the source code location where the error was
 	// created.
@@ -60,9 +52,9 @@ func (e *Err) Location() Location {
 	return e.Location_
 }
 
-// Underlying returns the underlying error if any.
-func (e *Err) Underlying() error {
-	return e.Underlying_
+// Previous returns the Previous error if any.
+func (e *Err) Previous() error {
+	return e.Previous_
 }
 
 // Cause implements Causer.
@@ -77,15 +69,19 @@ func (e *Err) Message() string {
 
 // Error implements error.Error.
 func (e *Err) Error() string {
-	switch {
-	case e.Message_ == "" && e.Underlying_ == nil:
-		return "<no error>"
-	case e.Message_ == "":
-		return e.Underlying_.Error()
-	case e.Underlying_ == nil:
-		return e.Message_
+	// We want to walk up the stack of errors showing the annotations
+	// as long as the cause is the same.
+	err := e.Previous_
+	if !sameError(Cause(err), e.Cause_) && e.Cause_ != nil {
+		err = e.Cause_
 	}
-	return fmt.Sprintf("%s: %v", e.Message_, e.Underlying_)
+	switch {
+	case err == nil:
+		return e.Message_
+	case e.Message_ == "":
+		return err.Error()
+	}
+	return fmt.Sprintf("%s: %v", e.Message_, err)
 }
 
 // GoString returns the details of the receiving error
@@ -108,13 +104,13 @@ type Causer interface {
 // general not be used otherwise.
 type Wrapper interface {
 	// Message returns the top level error message,
-	// not including the message from the underlying
+	// not including the message from the Previous
 	// error.
 	Message() string
 
-	// Underlying returns the underlying error, or nil
+	// Previous returns the Previous error, or nil
 	// if there is none.
-	Underlying() error
+	Previous() error
 }
 
 // Location can be implemented by any error type
@@ -124,15 +120,15 @@ type Locationer interface {
 }
 
 // Details returns information about the stack of
-// underlying errors wrapped by err, in the format:
+// Previous errors wrapped by err, in the format:
 //
 // 	[{filename:99: error one} {otherfile:55: cause of error one}]
 //
 // The details are found by type-asserting the error to
 // the Locationer, Causer and Wrapper interfaces.
-// Details of the underlying stack are found by
-// recursively calling Underlying when the
-// underlying error implements Wrapper.
+// Details of the Previous stack are found by
+// recursively calling Previous when the
+// Previous error implements Wrapper.
 func Details(err error) string {
 	if err == nil {
 		return "[]"
@@ -150,7 +146,7 @@ func Details(err error) string {
 		}
 		if cerr, ok := err.(Wrapper); ok {
 			s = append(s, cerr.Message()...)
-			err = cerr.Underlying()
+			err = cerr.Previous()
 		} else {
 			s = append(s, err.Error()...)
 			err = nil
@@ -177,7 +173,7 @@ func Details(err error) string {
 // e.Location, at callDepth stack frames above the call.
 func (e *Err) SetLocation(callDepth int) {
 	_, file, line, _ := runtime.Caller(callDepth + 1)
-	e.Location_ = Location{file, line}
+	e.Location_ = Location{trimGoPath(file), line}
 }
 
 func setLocation(err error, callDepth int) {
@@ -186,176 +182,191 @@ func setLocation(err error, callDepth int) {
 	}
 }
 
-// New returns a new error with the given error message and no cause. It
-// is a drop-in replacement for errors.New from the standard library.
+// New is a drop in replacement for the standard libary errors module that records
+// the location that the error is created.
+//
+// For example:
+//    return errgo.New("validation failed")
+//
 func New(s string) error {
 	err := &Err{Message_: s}
 	err.SetLocation(1)
 	return err
 }
 
-// Newf returns a new error with the given printf-formatted error
-// message and no cause.
-func Newf(f string, a ...interface{}) error {
-	err := &Err{Message_: fmt.Sprintf(f, a...)}
+// Errorf creates a new annotated error and records the location that the
+// error is created.  This should be a drop in replacement for fmt.Errorf.
+//
+// For example:
+//    return errgo.Errorf("validation failed: %s", message)
+//
+func Errorf(format string, args ...interface{}) error {
+	err := &Err{Message_: fmt.Sprintf(format, args...)}
 	err.SetLocation(1)
 	return err
 }
 
-// match returns whether any of the given
-// functions returns true when called with err as an
-// argument.
-func match(err error, pass ...func(error) bool) bool {
-	for _, f := range pass {
-		if f(err) {
-			return true
-		}
-	}
-	return false
-}
-
-// Is returns a function that returns whether the
-// an error is equal to the given error.
-// It is intended to be used as a "pass" argument
-// to Mask and friends; for example:
+// Trace always returns an annotated error.  Trace records the
+// location of the Trace call, and adds it to the annotation stack.
 //
-// 	return errors.Mask(err, errors.Is(http.ErrNoCookie))
+// For example:
+//   if err := SomeFunc(); err != nil {
+//       return errgo.Trace(err)
+//   }
 //
-// would return an error with an http.ErrNoCookie cause
-// only if that was err's diagnosis; otherwise the diagnosis
-// would be itself.
-func Is(err error) func(error) bool {
-	return func(err1 error) bool {
-		return err == err1
-	}
-}
-
-// Any returns true. It can be used as an argument to Mask
-// to allow any diagnosis to pass through to the wrapped
-// error.
-func Any(error) bool {
-	return true
-}
-
-// NoteMask returns an Err that has the given underlying error,
-// with the given message added as context, and allowing
-// the cause of the underlying error to pass through into
-// the result if allowed by the specific pass functions
-// (see Mask for an explanation of the pass parameter).
-func NoteMask(underlying error, msg string, pass ...func(error) bool) error {
-	newErr := &Err{
-		Underlying_: underlying,
-		Message_:    msg,
-	}
-	if len(pass) > 0 {
-		if cause := Cause(underlying); match(cause, pass...) {
-			newErr.Cause_ = cause
-		}
-	}
-	if debug {
-		if newd, oldd := newErr.Cause_, Cause(underlying); newd != oldd {
-			log.Printf("Mask cause %[1]T(%[1]v)->%[2]T(%[2]v)", oldd, newd)
-			log.Printf("call stack: %s", callers(0, 20))
-			log.Printf("len(allow) == %d", len(pass))
-			log.Printf("old error %#v", underlying)
-			log.Printf("new error %#v", newErr)
-		}
-	}
-	return newErr
-}
-
-// Mask returns an Err that wraps the given underyling error. The error
-// message is unchanged, but the error location records the caller of
-// Mask.
-//
-// If err is nil, Mask returns nil.
-//
-// By default Mask conceals the cause of the wrapped error, but if
-// pass(Cause(err)) returns true for any of the provided pass functions,
-// the cause of the returned error will be Cause(err).
-//
-// For example, the following code will return an error whose cause is
-// the error from the os.Open call when (and only when) the file does
-// not exist.
-//
-//	f, err := os.Open("non-existent-file")
-//	if err != nil {
-//		return errors.Mask(err, os.IsNotExist)
-//	}
-//
-// In order to add context to returned errors, it
-// is conventional to call Mask when returning any
-// error received from elsewhere.
-//
-func Mask(underlying error, pass ...func(error) bool) error {
-	if underlying == nil {
-		return nil
-	}
-	err := NoteMask(underlying, "", pass...)
-	setLocation(err, 1)
+func Trace(other error) error {
+	err := &Err{Previous_: other, Cause_: Cause(other)}
+	err.SetLocation(1)
 	return err
 }
 
-// Notef returns an Error that wraps the given underlying
-// error and adds the given formatted context message.
-// The returned error has no cause (use NoteMask
-// or WithCausef to add a message while retaining a cause).
-func Notef(underlying error, f string, a ...interface{}) error {
-	err := NoteMask(underlying, fmt.Sprintf(f, a...))
-	setLocation(err, 1)
-	return err
-}
-
-// MaskFunc returns an equivalent of Mask that always allows the
-// specified causes in addition to any causes specified when the
-// returned function is called.
+// Annotate is used to add extra context to an existing error. The location of
+// the Annotate call is recorded with the annotations. The file, line and
+// function are also recorded.
 //
-// It is defined for convenience, for example when all calls to Mask in
-// a given package wish to allow the same set of causes to be returned.
-func MaskFunc(allow ...func(error) bool) func(error, ...func(error) bool) error {
-	return func(err error, allow1 ...func(error) bool) error {
-		var allowEither []func(error) bool
-		if len(allow1) > 0 {
-			// This is more efficient than using a function literal,
-			// because the compiler knows that it doesn't escape.
-			allowEither = make([]func(error) bool, len(allow)+len(allow1))
-			copy(allowEither, allow)
-			copy(allowEither[len(allow):], allow1)
-		} else {
-			allowEither = allow
-		}
-		err = Mask(err, allowEither...)
-		setLocation(err, 1)
-		return err
-	}
-}
-
-// WithCausef returns a new Error that wraps the given
-// (possibly nil) underlying error and associates it with
-// the given cause. The given formatted message context
-// will also be added.
-func WithCausef(underlying, cause error, f string, a ...interface{}) error {
+// For example:
+//   if err := SomeFunc(); err != nil {
+//       return errgo.Annotate(err, "failed to frombulate")
+//   }
+//
+func Annotate(other error, message string) error {
+	// Underlying is the previous link used for traversing the stack.
+	// Cause is the reason for this error.
 	err := &Err{
-		Underlying_: underlying,
-		Cause_:      cause,
-		Message_:    fmt.Sprintf(f, a...),
+		Previous_: other,
+		Cause_:    Cause(other),
+		Message_:  message,
 	}
 	err.SetLocation(1)
 	return err
+}
+
+// Annotatef is used to add extra context to an existing error. The location of
+// the Annotate call is recorded with the annotations. The file, line and
+// function are also recorded.
+//
+// For example:
+//   if err := SomeFunc(); err != nil {
+//       return errgo.Annotatef(err, "failed to frombulate the %s", arg)
+//   }
+//
+func Annotatef(other error, format string, args ...interface{}) error {
+	// Underlying is the previous link used for traversing the stack.
+	// Cause is the reason for this error.
+	err := &Err{
+		Previous_: other,
+		Cause_:    Cause(other),
+		Message_:  fmt.Sprintf(format, args...),
+	}
+	err.SetLocation(1)
+	return err
+}
+
+// Wrap changes the error value that is returned with LastError. The location
+// of the Wrap call is also stored in the annotation stack.
+//
+// For example:
+//   if err := SomeFunc(); err != nil {
+//       newErr := &packageError{"more context", private_value}
+//       return errors.Wrap(err, newErr)
+//   }
+//
+func Wrap(other, newDescriptive error) error {
+	err := &Err{
+		Previous_: other,
+		Cause_:    newDescriptive,
+	}
+	err.SetLocation(1)
+	return err
+}
+
+// Check looks at the Cause of the error to see if it matches the checker
+// function.
+//
+// For example:
+//   if err := SomeFunc(); err != nil {
+//       if errgo.Check(err, os.IsNotExist) {
+//           return someOtherFunc()
+//       }
+//   }
+//
+func Check(err error, checker func(error) bool) bool {
+	return checker(Cause(err))
+}
+
+// ErrorStack returns a string representation of the annotated error. If the
+// error passed as the parameter is not an annotated error, the result is
+// simply the result of the Error() method on that error.
+//
+// If the error is an annotated error, a multi-line string is returned where
+// each line represents one entry in the annotation stack. The full filename
+// from the call stack is used in the output.
+func ErrorStack(err error) string {
+	if err == nil {
+		return ""
+	}
+	// We want the first error first
+	var lines []string
+	for {
+		var buff []byte
+		if err, ok := err.(Locationer); ok {
+			loc := err.Location()
+			// Strip off the leading GOPATH/src path elements.
+			loc.File = trimGoPath(loc.File)
+			if loc.IsSet() {
+				buff = append(buff, loc.String()...)
+				buff = append(buff, ": "...)
+			}
+		}
+		if cerr, ok := err.(Wrapper); ok {
+			message := cerr.Message()
+			buff = append(buff, message...)
+			// If there is a cause for this error, and it is different to the cause
+			// of the underlying error, then output the error string in the stack trace.
+			var cause error
+			if err1, ok := err.(Causer); ok {
+				cause = err1.Cause()
+			}
+			err = cerr.Previous()
+			if cause != nil && !sameError(Cause(err), cause) {
+				if message != "" {
+					buff = append(buff, ": "...)
+				}
+				buff = append(buff, cause.Error()...)
+			}
+		} else {
+			buff = append(buff, err.Error()...)
+			err = nil
+		}
+		lines = append(lines, string(buff))
+		if err == nil {
+			break
+		}
+	}
+	// reverse the lines to get the original error, which was at the end of
+	// the list, back to the start.
+	var result []string
+	for i := len(lines); i > 0; i-- {
+		result = append(result, lines[i-1])
+	}
+	return strings.Join(result, "\n")
+}
+
+// Ideally we'd have a way to check identity, but deep equals will do.
+func sameError(e1, e2 error) bool {
+	return reflect.DeepEqual(e1, e2)
 }
 
 // Cause returns the cause of the given error.  If err does not
 // implement Causer or its Cause method returns nil, it returns err itself.
 //
-// Cause is the usual way to diagnose errors that may have
-// been wrapped by Mask or NoteMask.
+// Cause is the usual way to diagnose errors that may have been wrapped by
+// the other errgo functions.
 func Cause(err error) error {
-	var diag error
 	if err, ok := err.(Causer); ok {
-		diag = err.Cause()
-	}
-	if diag != nil {
-		return diag
+		if diag := err.Cause(); diag != nil {
+			return diag
+		}
 	}
 	return err
 }

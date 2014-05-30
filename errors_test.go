@@ -3,9 +3,9 @@ package errgo_test
 import (
 	"fmt"
 	"io/ioutil"
-	"runtime"
+	"os"
+	"path/filepath"
 	"strings"
-	"testing"
 
 	gc "launchpad.net/gocheck"
 
@@ -18,126 +18,230 @@ var (
 	_ errgo.Causer     = (*errgo.Err)(nil)
 )
 
-func Test(t *testing.T) {
-	gc.TestingT(t)
-}
-
 type errorsSuite struct{}
 
 var _ = gc.Suite(&errorsSuite{})
 
 func (*errorsSuite) TestNew(c *gc.C) {
 	err := errgo.New("foo") //err TestNew
-	checkErr(c, err, nil, "foo", "[{$TestNew$: foo}]", err)
+	checkErr(c, err, err, "foo", "[{$TestNew$: foo}]")
 }
 
 func (*errorsSuite) TestNewf(c *gc.C) {
-	err := errgo.Newf("foo %d", 5) //err TestNewf
-	checkErr(c, err, nil, "foo 5", "[{$TestNewf$: foo 5}]", err)
+	err := errgo.Errorf("foo %d", 5) //err TestNewf
+	checkErr(c, err, err, "foo 5", "[{$TestNewf$: foo 5}]")
 }
 
 var someErr = errgo.New("some error") //err varSomeErr
 
 func annotate1() error {
-	err := errgo.Notef(someErr, "annotate1") //err annotate1
+	err := errgo.Annotate(someErr, "annotate1") //err annotate1
 	return err
 }
 
 func annotate2() error {
 	err := annotate1()
-	err = errgo.Notef(err, "annotate2") //err annotate2
+	err = errgo.Annotate(err, "annotate2") //err annotate2
 	return err
 }
 
-func (*errorsSuite) TestNoteUsage(c *gc.C) {
+func (*errorsSuite) TestAnnotateUsage(c *gc.C) {
 	err0 := annotate2()
-	err, ok := err0.(errgo.Wrapper)
-	c.Assert(ok, gc.Equals, true)
-	underlying := err.Underlying()
 	checkErr(
-		c, err0, underlying,
+		c, err0, someErr,
 		"annotate2: annotate1: some error",
 		"[{$annotate2$: annotate2} {$annotate1$: annotate1} {$varSomeErr$: some error}]",
-		err0)
+	)
 }
 
-func (*errorsSuite) TestMask(c *gc.C) {
-	err0 := errgo.WithCausef(nil, someErr, "foo") //err TestMask#0
-	err := errgo.Mask(err0)                       //err TestMask#1
-	checkErr(c, err, err0, "foo", "[{$TestMask#1$: } {$TestMask#0$: foo}]", err)
-
-	err = errgo.Mask(nil)
-	c.Assert(err, gc.IsNil)
-}
-
-func (*errorsSuite) TestNotef(c *gc.C) {
-	err0 := errgo.WithCausef(nil, someErr, "foo") //err TestNotef#0
-	err := errgo.Notef(err0, "bar")               //err TestNotef#1
-	checkErr(c, err, err0, "bar: foo", "[{$TestNotef#1$: bar} {$TestNotef#0$: foo}]", err)
-
-	err = errgo.Notef(nil, "bar") //err TestNotef#2
-	checkErr(c, err, nil, "bar", "[{$TestNotef#2$: bar}]", err)
-}
-
-func (*errorsSuite) TestMaskFunc(c *gc.C) {
-	err0 := errgo.New("zero")
-	err1 := errgo.New("one")
-
-	allowVals := func(vals ...error) (r []func(error) bool) {
-		for _, val := range vals {
-			r = append(r, errgo.Is(val))
+func (*errorsSuite) TestErrorString(c *gc.C) {
+	for i, test := range []struct {
+		message   string
+		generator func() error
+		expected  string
+	}{
+		{
+			message: "uncomparable errors",
+			generator: func() error {
+				err := errgo.Annotatef(newNonComparableError("uncomparable"), "annotation")
+				return errgo.Annotatef(err, "another")
+			},
+			expected: "another: annotation: uncomparable",
+		}, {
+			message: "Errorf",
+			generator: func() error {
+				return errgo.Errorf("first error")
+			},
+			expected: "first error",
+		}, {
+			message: "annotating nil",
+			generator: func() error {
+				return errgo.Annotatef(nil, "annotation")
+			},
+			expected: "annotation",
+		}, {
+			message: "annotated error",
+			generator: func() error {
+				err := errgo.Errorf("first error")
+				return errgo.Annotatef(err, "annotation")
+			},
+			expected: "annotation: first error",
+		}, {
+			message: "test annotation format",
+			generator: func() error {
+				err := errgo.Errorf("first %s", "error")
+				return errgo.Annotatef(err, "%s", "annotation")
+			},
+			expected: "annotation: first error",
+		}, {
+			message: "wrapped error",
+			generator: func() error {
+				err := newError("first error")
+				return errgo.Wrap(err, newError("detailed error"))
+			},
+			expected: "detailed error",
+		}, {
+			message: "wrapped annotated error",
+			generator: func() error {
+				err := errgo.Errorf("first error")
+				err = errgo.Annotatef(err, "annotated")
+				return errgo.Wrap(err, fmt.Errorf("detailed error"))
+			},
+			expected: "detailed error",
+		}, {
+			message: "annotated wrapped error",
+			generator: func() error {
+				err := errgo.Errorf("first error")
+				err = errgo.Wrap(err, fmt.Errorf("detailed error"))
+				return errgo.Annotatef(err, "annotated")
+			},
+			expected: "annotated: detailed error",
+		}, {
+			message: "traced, and annotated",
+			generator: func() error {
+				err := errgo.New("first error")
+				err = errgo.Trace(err)
+				err = errgo.Annotate(err, "some context")
+				err = errgo.Trace(err)
+				err = errgo.Annotate(err, "more context")
+				return errgo.Trace(err)
+			},
+			expected: "more context: some context: first error",
+		},
+	} {
+		c.Logf("%v: %s", i, test.message)
+		err := test.generator()
+		ok := c.Check(err.Error(), gc.Equals, test.expected)
+		if !ok {
+			c.Logf("%#v", test.generator())
 		}
-		return
 	}
-	tests := []struct {
-		err    error
-		allow0 []func(error) bool
-		allow1 []func(error) bool
-		cause  error
-	}{{
-		err:    err0,
-		allow0: allowVals(err0),
-		cause:  err0,
-	}, {
-		err:    err1,
-		allow0: allowVals(err0),
-		cause:  nil,
-	}, {
-		err:    err0,
-		allow1: allowVals(err0),
-		cause:  err0,
-	}, {
-		err:    err0,
-		allow0: allowVals(err1),
-		allow1: allowVals(err0),
-		cause:  err0,
-	}, {
-		err:    err0,
-		allow0: allowVals(err0, err1),
-		cause:  err0,
-	}, {
-		err:    err1,
-		allow0: allowVals(err0, err1),
-		cause:  err1,
-	}, {
-		err:    err0,
-		allow1: allowVals(err0, err1),
-		cause:  err0,
-	}, {
-		err:    err1,
-		allow1: allowVals(err0, err1),
-		cause:  err1,
-	}}
-	for i, test := range tests {
-		c.Logf("test %d", i)
-		wrap := errgo.MaskFunc(test.allow0...)
-		err := wrap(test.err, test.allow1...)
-		cause := errgo.Cause(err)
-		wantCause := test.cause
-		if wantCause == nil {
-			wantCause = err
+}
+
+func (*errorsSuite) TestAnnotatedErrorCheck(c *gc.C) {
+	// Look for a file that we know isn't there.
+	dir := c.MkDir()
+	_, err := os.Stat(filepath.Join(dir, "not-there"))
+	c.Assert(os.IsNotExist(err), gc.Equals, true)
+	c.Assert(errgo.Check(err, os.IsNotExist), gc.Equals, true)
+
+	err = errgo.Annotatef(err, "wrap it")
+	// Now the error itself isn't a 'IsNotExist'.
+	c.Assert(os.IsNotExist(err), gc.Equals, false)
+	// However if we use the Check method, it is.
+	c.Assert(errgo.Check(err, os.IsNotExist), gc.Equals, true)
+}
+
+func (*errorsSuite) TestErrorStack(c *gc.C) {
+	for i, test := range []struct {
+		message   string
+		generator func() error
+		expected  string
+	}{
+		{
+			message: "raw error",
+			generator: func() error {
+				return fmt.Errorf("raw")
+			},
+			expected: "raw",
+		}, {
+			message: "single error stack",
+			generator: func() error {
+				return errgo.New("first error") //err single
+			},
+			expected: "$single$: first error",
+		}, {
+			message: "annotated error",
+			generator: func() error {
+				err := errgo.New("first error")          //err annotated-0
+				return errgo.Annotate(err, "annotation") //err annotated-1
+			},
+			expected: "" +
+				"$annotated-0$: first error\n" +
+				"$annotated-1$: annotation",
+		}, {
+			message: "wrapped error",
+			generator: func() error {
+				err := errgo.New("first error")                    //err wrapped-0
+				return errgo.Wrap(err, newError("detailed error")) //err wrapped-1
+			},
+			expected: "" +
+				"$wrapped-0$: first error\n" +
+				"$wrapped-1$: detailed error",
+		}, {
+			message: "annotated wrapped error",
+			generator: func() error {
+				err := errgo.Errorf("first error")                  //err ann-wrap-0
+				err = errgo.Wrap(err, fmt.Errorf("detailed error")) //err ann-wrap-1
+				return errgo.Annotatef(err, "annotated")            //err ann-wrap-2
+			},
+			expected: "" +
+				"$ann-wrap-0$: first error\n" +
+				"$ann-wrap-1$: detailed error\n" +
+				"$ann-wrap-2$: annotated",
+		}, {
+			message: "traced, and annotated",
+			generator: func() error {
+				err := errgo.New("first error")           //err stack-0
+				err = errgo.Trace(err)                    //err stack-1
+				err = errgo.Annotate(err, "some context") //err stack-2
+				err = errgo.Trace(err)                    //err stack-3
+				err = errgo.Annotate(err, "more context") //err stack-4
+				return errgo.Trace(err)                   //err stack-5
+			},
+			expected: "" +
+				"$stack-0$: first error\n" +
+				"$stack-1$: \n" +
+				"$stack-2$: some context\n" +
+				"$stack-3$: \n" +
+				"$stack-4$: more context\n" +
+				"$stack-5$: ",
+		}, {
+			message: "uncomparable, wrapped with a value error",
+			generator: func() error {
+				err := newNonComparableError("first error")    //err mixed-0
+				err = errgo.Trace(err)                         //err mixed-1
+				err = errgo.Wrap(err, newError("value error")) //err mixed-2
+				err = errgo.Trace(err)                         //err mixed-3
+				err = errgo.Annotate(err, "more context")      //err mixed-4
+				return errgo.Trace(err)                        //err mixed-5
+			},
+			expected: "" +
+				"first error\n" +
+				"$mixed-1$: \n" +
+				"$mixed-2$: value error\n" +
+				"$mixed-3$: \n" +
+				"$mixed-4$: more context\n" +
+				"$mixed-5$: ",
+		},
+	} {
+		c.Logf("%v: %s", i, test.message)
+		err := test.generator()
+		expected := replaceLocations(test.expected)
+		ok := c.Check(errgo.ErrorStack(err), gc.Equals, expected)
+		if !ok {
+			c.Logf("%#v", err)
 		}
-		c.Check(cause, gc.Equals, wantCause)
 	}
 }
 
@@ -148,75 +252,33 @@ type embed struct {
 func (*errorsSuite) TestCause(c *gc.C) {
 	c.Assert(errgo.Cause(someErr), gc.Equals, someErr)
 
-	causeErr := errgo.New("cause error")
-	underlyingErr := errgo.New("underlying error")                 //err TestCause#1
-	err := errgo.WithCausef(underlyingErr, causeErr, "foo %d", 99) //err TestCause#2
-	c.Assert(errgo.Cause(err), gc.Equals, causeErr)
+	fmtErr := fmt.Errorf("simple")
+	c.Assert(errgo.Cause(fmtErr), gc.Equals, fmtErr)
 
-	checkErr(c, err, underlyingErr, "foo 99: underlying error", "[{$TestCause#2$: foo 99} {$TestCause#1$: underlying error}]", causeErr)
+	err := errgo.Wrap(someErr, fmtErr)
+	c.Assert(errgo.Cause(err), gc.Equals, fmtErr)
+
+	err = errgo.Annotate(err, "annotated")
+	c.Assert(errgo.Cause(err), gc.Equals, fmtErr)
 
 	err = &embed{err.(*errgo.Err)}
-	c.Assert(errgo.Cause(err), gc.Equals, causeErr)
+	c.Assert(errgo.Cause(err), gc.Equals, fmtErr)
 }
 
 func (*errorsSuite) TestDetails(c *gc.C) {
 	c.Assert(errgo.Details(nil), gc.Equals, "[]")
 
 	otherErr := fmt.Errorf("other")
-	checkErr(c, otherErr, nil, "other", "[{other}]", otherErr)
+	checkDetails(c, otherErr, "[{other}]")
 
 	err0 := &embed{errgo.New("foo").(*errgo.Err)} //err TestStack#0
-	checkErr(c, err0, nil, "foo", "[{$TestStack#0$: foo}]", err0)
+	checkDetails(c, err0, "[{$TestStack#0$: foo}]")
 
-	err1 := &embed{errgo.Notef(err0, "bar").(*errgo.Err)} //err TestStack#1
-	checkErr(c, err1, err0, "bar: foo", "[{$TestStack#1$: bar} {$TestStack#0$: foo}]", err1)
+	err1 := &embed{errgo.Annotate(err0, "bar").(*errgo.Err)} //err TestStack#1
+	checkDetails(c, err1, "[{$TestStack#1$: bar} {$TestStack#0$: foo}]")
 
-	err2 := errgo.Mask(err1) //err TestStack#2
-	checkErr(c, err2, err1, "bar: foo", "[{$TestStack#2$: } {$TestStack#1$: bar} {$TestStack#0$: foo}]", err2)
-}
-
-func (*errorsSuite) TestMatch(c *gc.C) {
-	type errTest func(error) bool
-	allow := func(ss ...string) []func(error) bool {
-		fns := make([]func(error) bool, len(ss))
-		for i, s := range ss {
-			s := s
-			fns[i] = func(err error) bool {
-				return err != nil && err.Error() == s
-			}
-		}
-		return fns
-	}
-	tests := []struct {
-		err error
-		fns []func(error) bool
-		ok  bool
-	}{{
-		err: errgo.New("foo"),
-		fns: allow("foo"),
-		ok:  true,
-	}, {
-		err: errgo.New("foo"),
-		fns: allow("bar"),
-		ok:  false,
-	}, {
-		err: errgo.New("foo"),
-		fns: allow("bar", "foo"),
-		ok:  true,
-	}, {
-		err: errgo.New("foo"),
-		fns: nil,
-		ok:  false,
-	}, {
-		err: nil,
-		fns: nil,
-		ok:  false,
-	}}
-
-	for i, test := range tests {
-		c.Logf("test %d", i)
-		c.Assert(errgo.Match(test.err, test.fns...), gc.Equals, test.ok)
-	}
+	err2 := errgo.Trace(err1) //err TestStack#2
+	checkDetails(c, err2, "[{$TestStack#2$: } {$TestStack#1$: bar} {$TestStack#0$: foo}]")
 }
 
 func (*errorsSuite) TestLocation(c *gc.C) {
@@ -224,17 +286,48 @@ func (*errorsSuite) TestLocation(c *gc.C) {
 	c.Assert(loc.String(), gc.Equals, "foo:35")
 }
 
-func checkErr(c *gc.C, err, underlying error, msg string, details string, cause error) {
+func checkDetails(c *gc.C, err error, details string) {
+	c.Assert(err, gc.NotNil)
+	expectedDetails := replaceLocations(details)
+	c.Assert(errgo.Details(err), gc.Equals, expectedDetails)
+}
+
+func checkErr(c *gc.C, err, cause error, msg string, details string) {
 	c.Assert(err, gc.NotNil)
 	c.Assert(err.Error(), gc.Equals, msg)
-	if err, ok := err.(errgo.Wrapper); ok {
-		c.Assert(err.Underlying(), gc.Equals, underlying)
-	} else {
-		c.Assert(underlying, gc.IsNil)
-	}
 	c.Assert(errgo.Cause(err), gc.Equals, cause)
-	wantDetails := replaceLocations(details)
-	c.Assert(errgo.Details(err), gc.Equals, wantDetails)
+	expectedDetails := replaceLocations(details)
+	c.Assert(errgo.Details(err), gc.Equals, expectedDetails)
+}
+
+// This is an uncomparable error type, as it is a struct that supports the
+// error interface (as opposed to a pointer type).
+type error_ struct {
+	info  string
+	slice []string
+}
+
+// Create a non-comparable error
+func newNonComparableError(message string) error {
+	return error_{info: message}
+}
+
+func (e error_) Error() string {
+	return e.info
+}
+
+func newError(message string) error {
+	return testError{message}
+}
+
+// The testError is a value type error for ease of seeing results
+// when the test fails.
+type testError struct {
+	message string
+}
+
+func (e testError) Error() string {
+	return e.message
 }
 
 func replaceLocations(s string) string {
@@ -263,13 +356,12 @@ func location(tag string) errgo.Location {
 		panic(fmt.Errorf("tag %q not found", tag))
 	}
 	return errgo.Location{
-		File: filename,
+		File: "github.com/juju/errgo/errors_test.go",
 		Line: line,
 	}
 }
 
 var tagToLine = make(map[string]int)
-var filename string
 
 func init() {
 	data, err := ioutil.ReadFile("errors_test.go")
@@ -282,5 +374,4 @@ func init() {
 			tagToLine[line[j+len("//err "):]] = i + 1
 		}
 	}
-	_, filename, _, _ = runtime.Caller(0)
 }
