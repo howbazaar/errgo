@@ -72,7 +72,7 @@ func (e *Err) Error() string {
 	// We want to walk up the stack of errors showing the annotations
 	// as long as the cause is the same.
 	err := e.Previous_
-	if !sameError(Cause(err), e.Cause_) && e.Cause_ != nil {
+	if !sameError(Cause(err), e.Cause_) {
 		err = e.Cause_
 	}
 	switch {
@@ -275,6 +275,28 @@ func Wrap(other, newDescriptive error) error {
 	err := &Err{
 		Previous_: other,
 		Cause_:    newDescriptive,
+	}
+	err.SetLocation(1)
+	return err
+}
+
+// Mask masks the given error (when it is not nil) with the given
+// format string and arguments (like fmt.Sprintf), returning a new
+// error.
+func Maskf(other error, format string, args ...interface{}) error {
+	err := &Err{
+		Message_:  fmt.Sprintf(format, args...),
+		Previous_: other,
+	}
+	err.SetLocation(1)
+	return err
+}
+
+// Mask is a simpler version of Maskf that takes no formatting arguments.
+func Mask(other error, message string) error {
+	err := &Err{
+		Message_:  message,
+		Previous_: other,
 	}
 	err.SetLocation(1)
 	return err

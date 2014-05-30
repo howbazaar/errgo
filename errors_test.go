@@ -27,12 +27,22 @@ func (*errorsSuite) TestNew(c *gc.C) {
 	checkErr(c, err, err, "foo", "[{$TestNew$: foo}]")
 }
 
-func (*errorsSuite) TestNewf(c *gc.C) {
+func (*errorsSuite) TestErrorf(c *gc.C) {
 	err := errgo.Errorf("foo %d", 5) //err TestNewf
 	checkErr(c, err, err, "foo 5", "[{$TestNewf$: foo 5}]")
 }
 
 var someErr = errgo.New("some error") //err varSomeErr
+
+func (*errorsSuite) TestMask(c *gc.C) {
+	err := errgo.Mask(someErr, "masked") //err Mask
+	checkErr(c, err, err, "masked", "[{$Mask$: masked} {$varSomeErr$: some error}]")
+}
+
+func (*errorsSuite) TestMaskf(c *gc.C) {
+	err := errgo.Maskf(someErr, "masked %d", 42) //err Maskf
+	checkErr(c, err, err, "masked 42", "[{$Maskf$: masked 42} {$varSomeErr$: some error}]")
+}
 
 func annotate1() error {
 	err := errgo.Annotate(someErr, "annotate1") //err annotate1
@@ -127,6 +137,17 @@ func (*errorsSuite) TestErrorString(c *gc.C) {
 				return errgo.Trace(err)
 			},
 			expected: "more context: some context: first error",
+		}, {
+			message: "traced, and annotated, masked and annotated",
+			generator: func() error {
+				err := errgo.New("first error")
+				err = errgo.Trace(err)
+				err = errgo.Annotate(err, "some context")
+				err = errgo.Mask(err, "masked")
+				err = errgo.Annotate(err, "more context")
+				return errgo.Trace(err)
+			},
+			expected: "more context: masked",
 		},
 	} {
 		c.Logf("%v: %s", i, test.message)
@@ -222,7 +243,7 @@ func (*errorsSuite) TestErrorStack(c *gc.C) {
 				err := newNonComparableError("first error")    //err mixed-0
 				err = errgo.Trace(err)                         //err mixed-1
 				err = errgo.Wrap(err, newError("value error")) //err mixed-2
-				err = errgo.Trace(err)                         //err mixed-3
+				err = errgo.Mask(err, "masked")                //err mixed-3
 				err = errgo.Annotate(err, "more context")      //err mixed-4
 				return errgo.Trace(err)                        //err mixed-5
 			},
@@ -230,7 +251,7 @@ func (*errorsSuite) TestErrorStack(c *gc.C) {
 				"first error\n" +
 				"$mixed-1$: \n" +
 				"$mixed-2$: value error\n" +
-				"$mixed-3$: \n" +
+				"$mixed-3$: masked\n" +
 				"$mixed-4$: more context\n" +
 				"$mixed-5$: ",
 		},
@@ -263,6 +284,9 @@ func (*errorsSuite) TestCause(c *gc.C) {
 
 	err = &embed{err.(*errgo.Err)}
 	c.Assert(errgo.Cause(err), gc.Equals, fmtErr)
+
+	err = errgo.Mask(err, "maksed")
+	c.Assert(errgo.Cause(err), gc.Equals, err)
 }
 
 func (*errorsSuite) TestDetails(c *gc.C) {
