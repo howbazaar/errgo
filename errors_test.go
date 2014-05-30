@@ -36,12 +36,12 @@ var someErr = errgo.New("some error") //err varSomeErr
 
 func (*errorsSuite) TestMask(c *gc.C) {
 	err := errgo.Mask(someErr, "masked") //err Mask
-	checkErr(c, err, err, "masked", "[{$Mask$: masked} {$varSomeErr$: some error}]")
+	checkErr(c, err, err, "masked: some error", "[{$Mask$: masked} {$varSomeErr$: some error}]")
 }
 
 func (*errorsSuite) TestMaskf(c *gc.C) {
 	err := errgo.Maskf(someErr, "masked %d", 42) //err Maskf
-	checkErr(c, err, err, "masked 42", "[{$Maskf$: masked 42} {$varSomeErr$: some error}]")
+	checkErr(c, err, err, "masked 42: some error", "[{$Maskf$: masked 42} {$varSomeErr$: some error}]")
 }
 
 func annotate1() error {
@@ -147,7 +147,7 @@ func (*errorsSuite) TestErrorString(c *gc.C) {
 				err = errgo.Annotate(err, "more context")
 				return errgo.Trace(err)
 			},
-			expected: "more context: masked",
+			expected: "more context: masked: some context: first error",
 		},
 	} {
 		c.Logf("%v: %s", i, test.message)
