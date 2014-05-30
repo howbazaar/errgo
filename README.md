@@ -200,6 +200,22 @@ For example:
 	return errgo.Errorf("validation failed: %s", message)
 
 
+## func Mask
+``` go
+func Mask(other error, message string) error
+```
+Mask is a simpler version of Maskf that takes no formatting arguments.
+
+
+## func Maskf
+``` go
+func Maskf(other error, format string, args ...interface{}) error
+```
+Mask masks the given error with the given format string and arguments (like
+fmt.Sprintf), returning a new error that maintains the error stack, but
+hides the underlying error.
+
+
 ## func New
 ``` go
 func New(s string) error

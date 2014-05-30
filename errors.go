@@ -280,9 +280,9 @@ func Wrap(other, newDescriptive error) error {
 	return err
 }
 
-// Mask masks the given error (when it is not nil) with the given
-// format string and arguments (like fmt.Sprintf), returning a new
-// error.
+// Mask masks the given error with the given format string and arguments (like
+// fmt.Sprintf), returning a new error that maintains the error stack, but
+// hides the underlying error.
 func Maskf(other error, format string, args ...interface{}) error {
 	err := &Err{
 		Message_:  fmt.Sprintf(format, args...),
